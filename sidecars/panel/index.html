@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Usage Monitor</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/preload.js"></script>
+</head>
+<body>
+  <main class="instrument">
+    <header class="topbar">
+      <div class="session-id">
+        <span id="status-dot" class="status-dot"></span>
+        <span id="model-name" class="model-name">No active session</span>
+      </div>
+    </header>
+
+    <section class="context-card">
+      <div class="context-head">
+        <span class="sec-label">Context</span>
+        <span id="ctx-threshold-label" class="meta-note">Alert at 65%</span>
+      </div>
+      <div class="context-readout">
+        <span id="ctx-pct" class="hero-pct">0.0%</span>
+        <span class="hero-tokens">
+          <strong id="ctx-used" class="hero-used">0</strong>
+          <span id="ctx-max" class="hero-max">/ 1M</span>
+        </span>
+      </div>
+      <div class="meter-wrap">
+        <div class="meter">
+          <div id="ctx-bar" class="meter-fill"></div>
+        </div>
+        <span id="ctx-tick" class="meter-tick" style="left: 65%" title="/compact alert threshold"></span>
+      </div>
+      <button id="compact-cue" class="compact-cue" type="button" hidden title="Click to copy /compact">
+        <span class="compact-cue-text">Run <code>/compact</code> to free context</span>
+        <span id="compact-cue-action" class="compact-cue-action">Copy</span>
+      </button>
+    </section>
+
+    <section class="windows-grid">
+      <div class="win-cell">
+        <div class="win-top">
+          <span class="win-tag">5h</span>
+          <span id="w5h-subhead" class="meta-note">Rolling</span>
+        </div>
+        <div id="w5h-val" class="win-val">0</div>
+        <div id="w5h-meta" class="win-meta">0 turns</div>
+        <div id="w5h-track" class="meter meter-slim" hidden>
+          <div id="w5h-bar" class="meter-fill"></div>
+        </div>
+      </div>
+
+      <div class="win-cell">
+        <div class="win-top">
+          <span class="win-tag">7d</span>
+          <span id="w7d-subhead" class="meta-note">Weekly</span>
+        </div>
+        <div id="w7d-val" class="win-val">0</div>
+        <div id="w7d-meta" class="win-meta">0 turns</div>
+        <div id="w7d-track" class="meter meter-slim" hidden>
+          <div id="w7d-bar" class="meter-fill"></div>
+        </div>
+      </div>
+    </section>
+
+    <button id="toggle-details" class="disclosure-bar" type="button" aria-expanded="false">
+      <span id="toggle-label">Details</span>
+      <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <path d="M2.75 4.5L6 7.75L9.25 4.5" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+
+    <section id="details-panel" class="details-stack" hidden>
+      <div class="detail-group">
+        <div class="group-head">
+          <span class="sec-label">Session</span>
+          <span id="sess-turns" class="meta-note">0 turns</span>
+        </div>
+        <div class="kv-list">
+          <div class="kv-row">
+            <span class="kv-key">Input</span>
+            <span id="sess-input" class="kv-val">0</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Cache read</span>
+            <span id="sess-cache" class="kv-val">0</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Output</span>
+            <span id="sess-output" class="kv-val">0</span>
+          </div>
+          <div class="kv-row kv-total">
+            <span class="kv-key-strong">Total</span>
+            <span id="sess-total" class="kv-val-strong">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="detail-group">
+        <div class="group-head">
+          <span class="sec-label">Current turn</span>
+          <span id="task-state" class="meta-note">Idle</span>
+        </div>
+        <div class="stat-strip">
+          <div class="stat-item">
+            <span class="stat-k">Tokens</span>
+            <span id="task-tokens" class="stat-v">0</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-k">Calls</span>
+            <span id="task-turns" class="stat-v">0</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-k">Time</span>
+            <span id="task-duration" class="stat-v">0s</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="models-block" class="detail-group" hidden>
+        <div class="group-head">
+          <span id="models-title" class="sec-label">Models</span>
+          <span id="models-count" class="meta-note"></span>
+        </div>
+        <div id="models-list" class="models-list"></div>
+      </div>
+
+      <div id="subagents-block" class="detail-group" hidden>
+        <div class="group-head">
+          <span class="sec-label">Subagents</span>
+          <span id="sub-active" class="meta-note"></span>
+        </div>
+        <div class="stat-strip">
+          <div class="stat-item">
+            <span class="stat-k">Spawned</span>
+            <span id="sub-count" class="stat-v">0</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-k">Calls</span>
+            <span id="sub-turns" class="stat-v">0</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-k">Tokens</span>
+            <span id="sub-tokens" class="stat-v">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="detail-group">
+        <div class="matrix-head">
+          <span class="sec-label">Rolling windows</span>
+          <span class="matrix-col">5h</span>
+          <span class="matrix-col">7d</span>
+        </div>
+        <div class="matrix-rows">
+          <div class="matrix-row">
+            <span class="kv-key">Input</span>
+            <span id="w5h-in" class="matrix-val">0</span>
+            <span id="w7d-in" class="matrix-val">0</span>
+          </div>
+          <div class="matrix-row">
+            <span class="kv-key">Output</span>
+            <span id="w5h-out" class="matrix-val">0</span>
+            <span id="w7d-out" class="matrix-val">0</span>
+          </div>
+          <div class="matrix-row">
+            <span class="kv-key">Cache read</span>
+            <span id="w5h-cache" class="matrix-val">0</span>
+            <span id="w7d-cache" class="matrix-val">0</span>
+          </div>
+          <div class="matrix-row">
+            <span class="kv-key">Turns</span>
+            <span id="w5h-turns" class="matrix-val">0</span>
+            <span id="w7d-turns" class="matrix-val">0</span>
+          </div>
+          <div class="matrix-row">
+            <span class="kv-key">Chats</span>
+            <span id="w5h-chats" class="matrix-val">0</span>
+            <span id="w7d-chats" class="matrix-val">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="detail-group detail-group-last">
+        <button id="toggle-limits" class="limits-trigger" type="button" aria-expanded="false">
+          <span class="sec-label">Limits &amp; threshold</span>
+          <span class="limits-right">
+            <span id="limits-summary" class="meta-note">65%</span>
+            <svg class="chevron" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M2.75 4.5L6 7.75L9.25 4.5" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+        </button>
+        <form id="limits-form" class="limits-box" hidden>
+          <label class="field-row" for="in-limit-5h">
+            <span class="field-label">5h limit</span>
+            <span class="field-input-wrap">
+              <input id="in-limit-5h" type="number" min="0" step="1" inputmode="numeric" value="0">
+              <span class="field-unit">K</span>
+            </span>
+          </label>
+          <label class="field-row" for="in-limit-7d">
+            <span class="field-label">7d limit</span>
+            <span class="field-input-wrap">
+              <input id="in-limit-7d" type="number" min="0" step="1" inputmode="numeric" value="0">
+              <span class="field-unit">K</span>
+            </span>
+          </label>
+          <label class="field-row" for="in-compact-pct">
+            <span class="field-label">/compact alert</span>
+            <span class="field-input-wrap">
+              <input id="in-compact-pct" type="number" min="10" max="95" step="1" inputmode="numeric" value="65">
+              <span class="field-unit">%</span>
+            </span>
+          </label>
+          <div class="limits-foot">
+            <span id="save-status" class="meta-note">0 disables limit</span>
+            <button class="btn-apply" type="submit">Apply</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "always",
+  "display_name": "Usage Monitor",
+  "description": "Minimal monochrome monitor for current session context and 5h / 7d usage.",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "Usage Monitor",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "Usage Monitor"
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "minimal-usage-monitor",
+  "displayName": "Usage Monitor",
+  "version": "1.0.0",
+  "description": "Minimal monochrome usage monitor showing current session context, 5-hour and 7-day rolling usage, with compact default view and expandable details."
+}
