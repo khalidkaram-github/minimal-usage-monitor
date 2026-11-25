@@ -1,18 +1,38 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Response, SidecarApp } from 'sidecar_sdk';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = join(HERE, '..', '..');
 const CONFIG_PATH = join(PLUGIN_ROOT, 'config.json');
-const BRAIN_DIR = join(homedir(), '.gemini', 'antigravity', 'brain');
+const HOME_DIR = homedir();
+const GEMINI_DIR = join(HOME_DIR, '.gemini');
+const GEMINI_CONFIG_DIR = join(GEMINI_DIR, 'config');
+const BRAIN_DIR = join(GEMINI_DIR, 'antigravity', 'brain');
 
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CONTEXT_TOKENS = 1000000;
 const ROLLING_CACHE_TTL_MS = 10000;
+const ENV_CACHE_TTL_MS = 15000;
+
+const PATH_ARG_KEYS = [
+  'Path',
+  'TargetFile',
+  'File',
+  'Directory',
+  'SearchPath',
+  'SearchDirectory',
+  'Cwd',
+  'ScriptPath',
+  'path',
+  'cwd',
+  'directory',
+  'file_path'
+];
 
 const DEFAULT_CONFIG = {
   limit5hTokens: 0,
@@ -21,6 +41,7 @@ const DEFAULT_CONFIG = {
 };
 
 const transcriptCache = new Map();
+const envCache = new Map();
 let rollingCache = { ts: 0, data: null };
 
 const app = new SidecarApp();
@@ -94,6 +115,361 @@ function extractSpawnedIds(text, excludedSet) {
   return found;
 }
 
+function normalizeForCompare(p) {
+  const norm = resolve(p).replace(/\\/g, '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? norm.toLowerCase() : norm;
+}
+
+const GEMINI_NORM = normalizeForCompare(GEMINI_DIR);
+const HOME_NORM = normalizeForCompare(HOME_DIR);
+
+function isInsideGeminiDir(p) {
+  try {
+    const n = normalizeForCompare(p);
+    return n === GEMINI_NORM || n.startsWith(`${GEMINI_NORM}/`);
+  } catch {
+    return false;
+  }
+}
+
+function unwrapArgString(raw) {
+  if (typeof raw !== 'string') return '';
+  let val = raw.trim();
+  if (val.startsWith('"') && val.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(val);
+      if (typeof parsed === 'string') val = parsed.trim();
+    } catch {}
+  }
+  return val;
+}
+
+function uriOrPathToLocal(input) {
+  if (!input || typeof input !== 'string') return '';
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  if (/^(vscode-remote|ssh):\/\//i.test(trimmed)) return '';
+  if (/^file:\/\//i.test(trimmed)) {
+    try {
+      const decoded = decodeURIComponent(trimmed);
+      if (/^file:\/\/\/[a-zA-Z]:\//.test(decoded)) {
+        return decoded.slice(8).replace(/\//g, '\\');
+      }
+      return fileURLToPath(decoded);
+    } catch {
+      try {
+        const stripped = decodeURIComponent(trimmed.replace(/^file:\/\/\/?/i, ''));
+        if (process.platform === 'win32' && /^[a-zA-Z]:/.test(stripped)) {
+          return stripped.replace(/\//g, '\\');
+        }
+        return stripped.startsWith('/') ? stripped : `/${stripped}`;
+      } catch {
+        return '';
+      }
+    }
+  }
+  if (/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(trimmed)) {
+    return trimmed;
+  }
+  return '';
+}
+
+function extractRemoteProjectName(uri) {
+  if (!uri || typeof uri !== 'string') return null;
+  const trimmed = uri.trim();
+  if (!/^(vscode-remote|ssh):\/\//i.test(trimmed)) return null;
+  try {
+    const u = new URL(trimmed);
+    const decoded = decodeURIComponent(u.pathname || '').replace(/\/+$/, '');
+    const seg = decoded.split('/').filter(Boolean).pop();
+    return seg || null;
+  } catch {
+    return null;
+  }
+}
+
+function detectLocation(workspaceHint, resolvedPath) {
+  const hint = String(workspaceHint || '').trim().toLowerCase();
+  const pathLower = String(resolvedPath || '').trim().toLowerCase();
+  if (
+    hint.startsWith('vscode-remote://wsl') ||
+    hint.startsWith('\\\\wsl$\\') ||
+    hint.startsWith('\\\\wsl.localhost\\') ||
+    hint.startsWith('//wsl$/') ||
+    hint.startsWith('//wsl.localhost/') ||
+    pathLower.startsWith('\\\\wsl$\\') ||
+    pathLower.startsWith('\\\\wsl.localhost\\') ||
+    Boolean(process.env.WSL_DISTRO_NAME)
+  ) {
+    return 'Remote · WSL';
+  }
+  if (
+    hint.startsWith('vscode-remote://ssh-remote') ||
+    hint.startsWith('ssh://') ||
+    Boolean(process.env.SSH_CONNECTION || process.env.SSH_CLIENT)
+  ) {
+    return 'Remote · SSH';
+  }
+  if (hint.startsWith('vscode-remote://')) {
+    return 'Remote';
+  }
+  return 'Local';
+}
+
+function findExistingDir(startPath) {
+  let curr = resolve(startPath);
+  for (let i = 0; i < 24; i++) {
+    try {
+      if (existsSync(curr)) {
+        const st = statSync(curr);
+        return st.isDirectory() ? curr : dirname(curr);
+      }
+    } catch {}
+    const parent = dirname(curr);
+    if (parent === curr) break;
+    curr = parent;
+  }
+  return null;
+}
+
+function findGitRoot(startDir) {
+  if (!startDir) return null;
+  let curr = resolve(startDir);
+  for (let i = 0; i < 24; i++) {
+    const norm = normalizeForCompare(curr);
+    if (norm === HOME_NORM) break;
+    try {
+      if (existsSync(join(curr, '.git'))) {
+        return curr;
+      }
+    } catch {}
+    const parent = dirname(curr);
+    if (parent === curr) break;
+    curr = parent;
+  }
+  return null;
+}
+
+function readGitStatus(repoRoot) {
+  let gitBranch = null;
+  let gitDirty = false;
+  if (!repoRoot) return { gitBranch, gitDirty };
+
+  try {
+    const dotGit = join(repoRoot, '.git');
+    if (!existsSync(dotGit)) return { gitBranch, gitDirty };
+    let gitDir = dotGit;
+    const st = statSync(dotGit);
+    if (st.isFile()) {
+      const ptr = readFileSync(dotGit, 'utf8').trim();
+      const match = ptr.match(/^gitdir:\s*(.+)$/i);
+      if (match) gitDir = resolve(repoRoot, match[1].trim());
+    }
+    const headPath = join(gitDir, 'HEAD');
+    if (existsSync(headPath)) {
+      const head = readFileSync(headPath, 'utf8').trim();
+      if (head.startsWith('ref: refs/heads/')) {
+        gitBranch = head.slice('ref: refs/heads/'.length).trim();
+      } else if (head.startsWith('ref: ')) {
+        gitBranch = head.split('/').pop() || null;
+      } else if (/^[0-9a-f]{7,40}$/i.test(head)) {
+        gitBranch = head.slice(0, 7);
+      }
+    }
+  } catch {}
+
+  if (gitBranch) {
+    try {
+      const out = execFileSync('git', ['-C', repoRoot, 'status', '--porcelain', '--untracked-files=normal'], {
+        encoding: 'utf8',
+        timeout: 1500,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore']
+      });
+      gitDirty = out.trim().length > 0;
+    } catch {}
+  }
+
+  return { gitBranch, gitDirty };
+}
+
+function getEnabledPluginDirs() {
+  const pluginsRoot = join(GEMINI_CONFIG_DIR, 'plugins');
+  if (!existsSync(pluginsRoot)) return [];
+
+  const disabled = new Set();
+  const globalCfgPath = join(GEMINI_CONFIG_DIR, 'config.json');
+  if (existsSync(globalCfgPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(globalCfgPath, 'utf8'));
+      if (parsed && parsed.plugins && typeof parsed.plugins === 'object') {
+        for (const [name, meta] of Object.entries(parsed.plugins)) {
+          if (meta && meta.enabled === false) disabled.add(name);
+        }
+      }
+    } catch {}
+  }
+
+  const dirs = [];
+  try {
+    const entries = readdirSync(pluginsRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      if (disabled.has(entry.name)) continue;
+      const full = join(pluginsRoot, entry.name);
+      if (existsSync(join(full, 'plugin.json'))) {
+        dirs.push(full);
+      }
+    }
+  } catch {}
+  return dirs;
+}
+
+function countSubdirs(dirPath, seenSet) {
+  if (!dirPath || !existsSync(dirPath)) return 0;
+  const key = normalizeForCompare(dirPath);
+  if (seenSet.has(key)) return 0;
+  seenSet.add(key);
+  let count = 0;
+  try {
+    const entries = readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith('.')) count++;
+    }
+  } catch {}
+  return count;
+}
+
+function countMcpServersInFile(filePath) {
+  if (!filePath || !existsSync(filePath)) return 0;
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return 0;
+    if (parsed.mcpServers && typeof parsed.mcpServers === 'object') {
+      return Object.keys(parsed.mcpServers).length;
+    }
+    if (parsed.servers && typeof parsed.servers === 'object') {
+      return Object.keys(parsed.servers).length;
+    }
+  } catch {}
+  return 0;
+}
+
+function countRuleFiles(workspaceDir, enabledPlugins) {
+  const seen = new Set();
+  const addFile = (p) => {
+    try {
+      if (existsSync(p) && statSync(p).isFile()) {
+        seen.add(normalizeForCompare(p));
+      }
+    } catch {}
+  };
+  const addMarkdownDir = (d) => {
+    try {
+      if (!existsSync(d)) return;
+      const entries = readdirSync(d, { withFileTypes: true });
+      for (const e of entries) {
+        if (e.isFile() && e.name.toLowerCase().endsWith('.md')) {
+          seen.add(normalizeForCompare(join(d, e.name)));
+        }
+      }
+    } catch {}
+  };
+
+  addFile(join(GEMINI_DIR, 'GEMINI.md'));
+  addFile(join(GEMINI_DIR, 'AGENTS.md'));
+  addFile(join(GEMINI_CONFIG_DIR, 'GEMINI.md'));
+  addFile(join(GEMINI_CONFIG_DIR, 'AGENTS.md'));
+  addMarkdownDir(join(GEMINI_CONFIG_DIR, 'rules'));
+
+  if (Array.isArray(enabledPlugins)) {
+    for (const pDir of enabledPlugins) {
+      addMarkdownDir(join(pDir, 'rules'));
+    }
+  }
+
+  if (workspaceDir) {
+    addFile(join(workspaceDir, 'GEMINI.md'));
+    addFile(join(workspaceDir, 'AGENTS.md'));
+    addFile(join(workspaceDir, 'CLAUDE.md'));
+    addMarkdownDir(join(workspaceDir, '.agents', 'rules'));
+    addMarkdownDir(join(workspaceDir, '.agent', 'rules'));
+  }
+
+  return seen.size;
+}
+
+function getEnvironmentInfo(now, workspaceHint, mainTranscript) {
+  let explicitLocal = uriOrPathToLocal(workspaceHint);
+  if (explicitLocal && isInsideGeminiDir(explicitLocal)) {
+    explicitLocal = '';
+  }
+
+  let candidateLocal = explicitLocal;
+  if (!candidateLocal && mainTranscript && mainTranscript.lastWorkspaceCandidate) {
+    candidateLocal = uriOrPathToLocal(mainTranscript.lastWorkspaceCandidate);
+  }
+
+  let workspaceDir = null;
+  let gitRoot = null;
+  if (candidateLocal) {
+    const existingDir = findExistingDir(candidateLocal);
+    if (existingDir && !isInsideGeminiDir(existingDir) && normalizeForCompare(existingDir) !== HOME_NORM) {
+      gitRoot = findGitRoot(existingDir);
+      if (gitRoot) {
+        workspaceDir = gitRoot;
+      } else if (explicitLocal) {
+        workspaceDir = existingDir;
+      }
+    }
+  }
+
+  const remoteProject = !workspaceDir ? extractRemoteProjectName(workspaceHint) : null;
+  const location = detectLocation(workspaceHint, workspaceDir || candidateLocal);
+  const cacheKey = `${workspaceDir || remoteProject || '__none__'}|${location}`;
+
+  const cached = envCache.get(cacheKey);
+  if (cached && now - cached.ts < ENV_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const projectName = workspaceDir ? (basename(workspaceDir) || null) : remoteProject;
+  const { gitBranch, gitDirty } = gitRoot ? readGitStatus(gitRoot) : { gitBranch: null, gitDirty: false };
+
+  const enabledPlugins = getEnabledPluginDirs();
+  const pluginsCount = enabledPlugins.length;
+  const rulesCount = countRuleFiles(workspaceDir, enabledPlugins);
+
+  const seenSkillDirs = new Set();
+  let skillsCount = countSubdirs(join(GEMINI_CONFIG_DIR, 'skills'), seenSkillDirs);
+  for (const pDir of enabledPlugins) {
+    skillsCount += countSubdirs(join(pDir, 'skills'), seenSkillDirs);
+  }
+  if (workspaceDir) {
+    skillsCount += countSubdirs(join(workspaceDir, '.agents', 'skills'), seenSkillDirs);
+    skillsCount += countSubdirs(join(workspaceDir, '.agent', 'skills'), seenSkillDirs);
+  }
+
+  let mcpCount = countMcpServersInFile(join(GEMINI_CONFIG_DIR, 'mcp_config.json'));
+  for (const pDir of enabledPlugins) {
+    mcpCount += countMcpServersInFile(join(pDir, 'mcp_config.json'));
+  }
+
+  const data = {
+    projectName,
+    gitBranch,
+    gitDirty,
+    location,
+    rulesCount,
+    mcpCount,
+    pluginsCount,
+    skillsCount
+  };
+
+  envCache.set(cacheKey, { ts: now, data });
+  return data;
+}
+
 function parseTranscriptFile(filePath) {
   if (!existsSync(filePath)) return null;
   let stat;
@@ -127,6 +503,8 @@ function parseTranscriptFile(filePath) {
   let lastTime = null;
   let lastUserIdx = -1;
   let modelTurns = 0;
+  let toolCalls = 0;
+  let lastWorkspaceCandidate = null;
   const events = [];
   const spawnedCandidates = [];
 
@@ -152,6 +530,21 @@ function parseTranscriptFile(filePath) {
 
     if (step.source === 'USER_EXPLICIT' || step.type === 'USER_INPUT') {
       lastUserIdx = events.length;
+    }
+
+    if (Array.isArray(step.tool_calls)) {
+      toolCalls += step.tool_calls.length;
+      for (const tc of step.tool_calls) {
+        if (!tc || !tc.args || typeof tc.args !== 'object') continue;
+        for (const key of PATH_ARG_KEYS) {
+          if (tc.args[key] === undefined) continue;
+          const unwrapped = unwrapArgString(tc.args[key]);
+          const local = uriOrPathToLocal(unwrapped);
+          if (local && !isInsideGeminiDir(local)) {
+            lastWorkspaceCandidate = local;
+          }
+        }
+      }
     }
 
     const stepStr = (step.content || '') + (step.tool_calls ? JSON.stringify(step.tool_calls) : '');
@@ -200,6 +593,8 @@ function parseTranscriptFile(filePath) {
     lastTime,
     lastUserIdx,
     modelTurns,
+    toolCalls,
+    lastWorkspaceCandidate,
     stepCount: lines.length,
     activeModel: currentModel || 'Unknown',
     events,
@@ -318,12 +713,21 @@ app.api('/api/stats', (params) => {
   const config = loadConfig();
   const rolling = getRollingUsage(now);
   const conversationId = params.conversationId || app.config?.conversationId || '';
+  const workspaceHint =
+    params.workspaceUri ||
+    params.workspacePath ||
+    app.config?.workspaceUri ||
+    app.config?.workspacePath ||
+    app.config?.workspace ||
+    app.config?.cwd ||
+    '';
 
   if (!conversationId) {
     return {
       active: false,
       config,
-      rolling
+      rolling,
+      environment: getEnvironmentInfo(now, workspaceHint, null)
     };
   }
 
@@ -336,6 +740,7 @@ app.api('/api/stats', (params) => {
       conversationId,
       config,
       rolling,
+      environment: getEnvironmentInfo(now, workspaceHint, null),
       modelName: 'Waiting...',
       isAgentActive: false,
       context: {
@@ -350,6 +755,8 @@ app.api('/api/stats', (params) => {
         output: 0,
         tokens: 0,
         turns: 0,
+        toolCalls: 0,
+        durationMinutes: 0,
         models: []
       },
       currentTask: {
@@ -382,7 +789,10 @@ app.api('/api/stats', (params) => {
   let subCache = 0;
   let subOutput = 0;
   let subTurns = 0;
+  let subToolCalls = 0;
   let subActiveCount = 0;
+  let sessionFirstTime = main.firstTime;
+  let sessionLastTime = main.lastTime;
   const sessionModels = {};
 
   for (const ev of main.events) {
@@ -409,6 +819,13 @@ app.api('/api/stats', (params) => {
     subOutput += sub.totalOutput;
     subTokens += sub.totalInput + sub.totalOutput;
     subTurns += sub.modelTurns;
+    subToolCalls += sub.toolCalls;
+    if (sub.firstTime !== null && (sessionFirstTime === null || sub.firstTime < sessionFirstTime)) {
+      sessionFirstTime = sub.firstTime;
+    }
+    if (sub.lastTime !== null && (sessionLastTime === null || sub.lastTime > sessionLastTime)) {
+      sessionLastTime = sub.lastTime;
+    }
     if (sub.lastTime && now - sub.lastTime < 10000) {
       subActiveCount++;
     }
@@ -459,6 +876,11 @@ app.api('/api/stats', (params) => {
     ? Math.max(1, Math.round(((isAgentActive ? now : (taskEnd || now)) - taskStart) / 1000))
     : 0;
 
+  const endTime = isAgentActive ? now : (sessionLastTime || now);
+  const durationMinutes = sessionFirstTime !== null && endTime >= sessionFirstTime
+    ? Math.max(0, Math.round((endTime - sessionFirstTime) / 60000))
+    : 0;
+
   const contextUsed = main.lastInput + main.lastCacheRead + main.lastOutput;
   const contextPct = Number(((contextUsed / MAX_CONTEXT_TOKENS) * 100).toFixed(1));
 
@@ -475,11 +897,14 @@ app.api('/api/stats', (params) => {
     }))
     .sort((a, b) => b.tokens - a.tokens);
 
+  const environment = getEnvironmentInfo(now, workspaceHint, main);
+
   return {
     active: true,
     conversationId,
     config,
     rolling,
+    environment,
     modelName: main.activeModel,
     isAgentActive,
     context: {
@@ -494,6 +919,8 @@ app.api('/api/stats', (params) => {
       output: main.totalOutput + subOutput,
       tokens: sessionTotalTokens,
       turns: main.modelTurns + subTurns,
+      toolCalls: main.toolCalls + subToolCalls,
+      durationMinutes,
       models: modelsList
     },
     currentTask: {

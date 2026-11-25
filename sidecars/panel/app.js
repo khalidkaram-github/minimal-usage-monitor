@@ -94,6 +94,22 @@ function formatReset(mins) {
   return `${m}m`;
 }
 
+function formatMinutes(mins) {
+  const m = Math.max(0, Math.round(Number(mins) || 0));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem > 0 ? `${h}h ${rem}m` : `${h}h`;
+}
+
+function formatProjectRef(env) {
+  if (!env || !env.projectName) return null;
+  if (env.gitBranch) {
+    return `${env.projectName} · ${env.gitBranch}${env.gitDirty ? '*' : ''}`;
+  }
+  return env.projectName;
+}
+
 function pluralize(count, singular, plural) {
   const n = Number(count) || 0;
   return `${n} ${n === 1 ? singular : plural}`;
@@ -194,6 +210,37 @@ function render(data) {
     dot.classList.remove('busy', 'idle');
   }
 
+  const env = data.environment || {
+    projectName: null,
+    gitBranch: null,
+    gitDirty: false,
+    location: 'Local',
+    rulesCount: 0,
+    mcpCount: 0,
+    pluginsCount: 0,
+    skillsCount: 0
+  };
+  const projectRef = formatProjectRef(env);
+  const compactEnv = document.getElementById('compact-env');
+  const compactProj = document.getElementById('compact-project');
+  const compactBranch = document.getElementById('compact-branch');
+
+  if (env.projectName) {
+    compactEnv.hidden = false;
+    compactEnv.title = projectRef || env.projectName;
+    compactProj.textContent = env.projectName;
+    if (env.gitBranch) {
+      compactBranch.hidden = false;
+      compactBranch.textContent = `· ${env.gitBranch}${env.gitDirty ? '*' : ''}`;
+    } else {
+      compactBranch.hidden = true;
+      compactBranch.textContent = '';
+    }
+  } else {
+    compactEnv.hidden = true;
+    compactEnv.title = '';
+  }
+
   const cfg = data.config || { limit5hTokens: 0, limit7dTokens: 0, compactThresholdPct: 65 };
   const threshold = Math.min(95, Math.max(10, Number(cfg.compactThresholdPct) || 65));
   syncConfigInputs(cfg, false);
@@ -266,12 +313,13 @@ function render(data) {
     w7dTrack.hidden = true;
   }
 
-  const sess = data.session || { input: 0, cache: 0, output: 0, tokens: 0, turns: 0, models: [] };
+  const sess = data.session || { input: 0, cache: 0, output: 0, tokens: 0, turns: 0, toolCalls: 0, durationMinutes: 0, models: [] };
   document.getElementById('sess-turns').textContent = pluralize(sess.turns, 'turn', 'turns');
   document.getElementById('sess-input').textContent = formatTokens(sess.input);
   document.getElementById('sess-cache').textContent = formatTokens(sess.cache);
   document.getElementById('sess-output').textContent = formatTokens(sess.output);
   document.getElementById('sess-total').textContent = formatTokens(sess.tokens);
+  document.getElementById('sess-activity').textContent = `${pluralize(sess.toolCalls, 'tool', 'tools')} · ${formatMinutes(sess.durationMinutes)}`;
 
   const task = data.currentTask || { tokens: 0, turns: 0, durationSeconds: 0 };
   const taskState = document.getElementById('task-state');
@@ -332,6 +380,14 @@ function render(data) {
   document.getElementById('w7d-turns').textContent = String(w7d.turns || 0);
   document.getElementById('w5h-chats').textContent = String(w5h.conversations || 0);
   document.getElementById('w7d-chats').textContent = String(w7d.conversations || 0);
+
+  const envProjEl = document.getElementById('env-project');
+  envProjEl.textContent = projectRef || 'No project';
+  envProjEl.title = projectRef || '';
+  document.getElementById('env-mode').textContent = env.location || 'Local';
+  document.getElementById('env-rules').textContent = pluralize(env.rulesCount, 'file', 'files');
+  document.getElementById('env-mcp').textContent = pluralize(env.mcpCount, 'server', 'servers');
+  document.getElementById('env-plugins-skills').textContent = `${Number(env.pluginsCount) || 0} · ${Number(env.skillsCount) || 0}`;
 }
 
 async function copyCompactCommand() {
@@ -367,12 +423,37 @@ function sidecarFetch(url, opts) {
   return f(url, opts);
 }
 
+function getWorkspaceParams() {
+  const sc = window.sidecar;
+  if (!sc) return { workspacePath: '', workspaceUri: '' };
+  let workspaceUri = typeof sc.workspaceUri === 'string' ? sc.workspaceUri : '';
+  let workspacePath = typeof sc.workspacePath === 'string' ? sc.workspacePath : '';
+  if (!workspacePath && !workspaceUri && sc.workspace) {
+    if (typeof sc.workspace === 'string') {
+      if (sc.workspace.includes('://')) workspaceUri = sc.workspace;
+      else workspacePath = sc.workspace;
+    } else if (typeof sc.workspace === 'object') {
+      if (typeof sc.workspace.uri === 'string') workspaceUri = sc.workspace.uri;
+      if (typeof sc.workspace.path === 'string') workspacePath = sc.workspace.path;
+    }
+  }
+  if (!workspacePath && typeof sc.cwd === 'string') {
+    workspacePath = sc.cwd;
+  }
+  return { workspacePath, workspaceUri };
+}
+
 async function poll() {
   syncTheme();
   const convId = window.sidecar && window.sidecar.conversationId ? window.sidecar.conversationId : '';
+  const { workspacePath, workspaceUri } = getWorkspaceParams();
+  const qs = new URLSearchParams();
+  if (convId) qs.set('conversationId', convId);
+  if (workspacePath) qs.set('workspacePath', workspacePath);
+  if (workspaceUri) qs.set('workspaceUri', workspaceUri);
+  const query = qs.toString();
   try {
-    const q = convId ? `?conversationId=${encodeURIComponent(convId)}` : '';
-    const res = await sidecarFetch(`/api/stats${q}`);
+    const res = await sidecarFetch(query ? `/api/stats?${query}` : '/api/stats');
     if (!res.ok) return;
     const data = await res.json();
     render(data);

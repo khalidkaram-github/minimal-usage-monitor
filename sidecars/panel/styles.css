@@ -87,11 +87,37 @@ body {
 
 .topbar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 3px;
   padding-bottom: 11px;
   border-bottom: 1px solid var(--line);
+}
+
+.compact-env {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding-left: 13px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.compact-project {
+  color: var(--ink-2);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compact-branch {
+  color: var(--ink-3);
+  font-weight: 400;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-id {
@@ -428,22 +454,36 @@ body {
   border-top: 1px solid var(--line);
 }
 
+.kv-activity {
+  padding-top: 3px;
+}
+
 .kv-key {
   color: var(--ink-3);
   font-size: 11.5px;
   font-weight: 400;
+  flex-shrink: 0;
 }
 
 .kv-key-strong {
   color: var(--ink);
   font-size: 11.5px;
   font-weight: 600;
+  flex-shrink: 0;
 }
 
 .kv-val {
   color: var(--ink-2);
   font-size: 11.5px;
   font-weight: 500;
+}
+
+.kv-val-trunc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
 }
 
 .kv-val-strong {
