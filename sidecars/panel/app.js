@@ -1,4 +1,3 @@
-let detailsOpen = false;
 let limitsOpen = false;
 let saveStatusTimer = null;
 let copyFeedbackTimer = null;
@@ -115,15 +114,6 @@ function pluralize(count, singular, plural) {
   return `${n} ${n === 1 ? singular : plural}`;
 }
 
-function syncDetailsState() {
-  const panel = document.getElementById('details-panel');
-  const btn = document.getElementById('toggle-details');
-  const label = document.getElementById('toggle-label');
-  panel.hidden = !detailsOpen;
-  btn.setAttribute('aria-expanded', detailsOpen ? 'true' : 'false');
-  label.textContent = detailsOpen ? 'Hide details' : 'Details';
-}
-
 function syncLimitsState() {
   const form = document.getElementById('limits-form');
   const btn = document.getElementById('toggle-limits');
@@ -195,6 +185,35 @@ function renderModels(listEl, models, showBars) {
   }
 }
 
+function renderDailyBars(container, daily) {
+  container.innerHTML = '';
+  if (!Array.isArray(daily) || daily.length === 0) return;
+  const maxTok = Math.max(1, ...daily.map((d) => Number(d.tokens) || 0));
+  for (const d of daily) {
+    const tok = Number(d.tokens) || 0;
+    const col = document.createElement('div');
+    col.className = 'daily-col';
+    col.title = `${d.label}: ${formatTokens(tok)} · ${pluralize(d.turns, 'turn', 'turns')}`;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'daily-bar-wrap';
+
+    const bar = document.createElement('div');
+    bar.className = tok > 0 ? (d.isToday ? 'daily-bar today' : 'daily-bar') : 'daily-bar empty';
+    const pct = tok > 0 ? Math.max(10, Math.round((tok / maxTok) * 100)) : 6;
+    bar.style.height = `${pct}%`;
+
+    const lbl = document.createElement('span');
+    lbl.className = d.isToday ? 'daily-label today' : 'daily-label';
+    lbl.textContent = d.label;
+
+    wrap.appendChild(bar);
+    col.appendChild(wrap);
+    col.appendChild(lbl);
+    container.appendChild(col);
+  }
+}
+
 function render(data) {
   const dot = document.getElementById('status-dot');
   const modelEl = document.getElementById('model-name');
@@ -221,25 +240,6 @@ function render(data) {
     skillsCount: 0
   };
   const projectRef = formatProjectRef(env);
-  const compactEnv = document.getElementById('compact-env');
-  const compactProj = document.getElementById('compact-project');
-  const compactBranch = document.getElementById('compact-branch');
-
-  if (env.projectName) {
-    compactEnv.hidden = false;
-    compactEnv.title = projectRef || env.projectName;
-    compactProj.textContent = env.projectName;
-    if (env.gitBranch) {
-      compactBranch.hidden = false;
-      compactBranch.textContent = `· ${env.gitBranch}${env.gitDirty ? '*' : ''}`;
-    } else {
-      compactBranch.hidden = true;
-      compactBranch.textContent = '';
-    }
-  } else {
-    compactEnv.hidden = true;
-    compactEnv.title = '';
-  }
 
   const cfg = data.config || { limit5hTokens: 0, limit7dTokens: 0, compactThresholdPct: 65 };
   const threshold = Math.min(95, Math.max(10, Number(cfg.compactThresholdPct) || 65));
@@ -342,16 +342,11 @@ function render(data) {
   const modelsCount = document.getElementById('models-count');
   const modelsList = document.getElementById('models-list');
 
-  if (sess.models && sess.models.length > 0) {
+  if (sess.models && sess.models.length > 1) {
     modelsBlock.hidden = false;
-    modelsTitle.textContent = 'Models';
-    modelsCount.textContent = sess.models.length > 1 ? `${sess.models.length} used` : '';
-    renderModels(modelsList, sess.models, sess.models.length > 1);
-  } else if (!data.active && w7d.models && w7d.models.length > 0) {
-    modelsBlock.hidden = false;
-    modelsTitle.textContent = 'Models (7d)';
-    modelsCount.textContent = w7d.models.length > 1 ? `Top ${w7d.models.length}` : '';
-    renderModels(modelsList, w7d.models, w7d.models.length > 1);
+    modelsTitle.textContent = 'Session models';
+    modelsCount.textContent = `${sess.models.length} used`;
+    renderModels(modelsList, sess.models, true);
   } else {
     modelsBlock.hidden = true;
   }
@@ -380,6 +375,25 @@ function render(data) {
   document.getElementById('w7d-turns').textContent = String(w7d.turns || 0);
   document.getElementById('w5h-chats').textContent = String(w5h.conversations || 0);
   document.getElementById('w7d-chats').textContent = String(w7d.conversations || 0);
+
+  const daily = Array.isArray(w7d.daily) ? w7d.daily : [];
+  const todayItem = daily.find((d) => d.isToday);
+  document.getElementById('activity-7d-meta').textContent = todayItem
+    ? `Today ${formatTokens(todayItem.tokens)}`
+    : 'Last 7 days';
+  renderDailyBars(document.getElementById('activity-7d-bars'), daily);
+
+  const models7dBlock = document.getElementById('models-7d-block');
+  const models7dCount = document.getElementById('models-7d-count');
+  const models7dList = document.getElementById('models-7d-list');
+  const top7d = Array.isArray(w7d.models) ? w7d.models.slice(0, 4) : [];
+  if (top7d.length > 0) {
+    models7dBlock.hidden = false;
+    models7dCount.textContent = top7d.length > 1 ? `Top ${top7d.length}` : '';
+    renderModels(models7dList, top7d, top7d.length > 1);
+  } else {
+    models7dBlock.hidden = true;
+  }
 
   const envProjEl = document.getElementById('env-project');
   envProjEl.textContent = projectRef || 'No project';
@@ -462,15 +476,9 @@ async function poll() {
 
 function init() {
   syncTheme();
-  syncDetailsState();
   syncLimitsState();
 
   document.getElementById('compact-cue').addEventListener('click', copyCompactCommand);
-
-  document.getElementById('toggle-details').addEventListener('click', () => {
-    detailsOpen = !detailsOpen;
-    syncDetailsState();
-  });
 
   document.getElementById('toggle-limits').addEventListener('click', () => {
     limitsOpen = !limitsOpen;

@@ -616,6 +616,25 @@ function getRollingUsage(now) {
   const w5h = { input: 0, cache: 0, output: 0, tokens: 0, turns: 0, conversations: 0, oldestTs: null };
   const w7d = { input: 0, cache: 0, output: 0, tokens: 0, turns: 0, conversations: 0, models: {} };
 
+  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const dailyBuckets = [];
+  const dailyByKey = new Map();
+  for (let d = 6; d >= 0; d--) {
+    const dt = new Date(todayStart.getTime() - d * 24 * 60 * 60 * 1000);
+    const key = `${dt.getFullYear()}-${dt.getMonth() + 1}-${dt.getDate()}`;
+    const bucket = {
+      key,
+      label: d === 0 ? 'Today' : DAY_NAMES[dt.getDay()],
+      tokens: 0,
+      turns: 0,
+      isToday: d === 0
+    };
+    dailyBuckets.push(bucket);
+    dailyByKey.set(key, bucket);
+  }
+
   if (existsSync(BRAIN_DIR)) {
     let entries = [];
     try {
@@ -650,6 +669,14 @@ function getRollingUsage(now) {
           w7d.tokens += tok;
           w7d.turns++;
           w7d.models[ev.model] = (w7d.models[ev.model] || 0) + tok;
+
+          const evDate = new Date(ev.ts);
+          const evKey = `${evDate.getFullYear()}-${evDate.getMonth() + 1}-${evDate.getDate()}`;
+          const bucket = dailyByKey.get(evKey);
+          if (bucket) {
+            bucket.tokens += tok;
+            bucket.turns++;
+          }
 
           if (ev.ts >= cutoff5h) {
             had5h = true;
@@ -700,7 +727,8 @@ function getRollingUsage(now) {
       output: w7d.output,
       turns: w7d.turns,
       conversations: w7d.conversations,
-      models: topModels7d
+      models: topModels7d,
+      daily: dailyBuckets
     }
   };
 
